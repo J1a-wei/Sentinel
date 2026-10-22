@@ -1,0 +1,131 @@
+# Sentinel 开发环境编排（一期 A）
+#
+# 定位：单机开发闭环，仅受控 loopback；生产部署（TLS、每主机 NATS 身份、跨机网络）
+# 尚未实现，见 docs/deployment.md 的边界说明。
+#
+# 使用前准备（详见 docs/deployment.md）：
+#   1. bash scripts/make-dev-secrets.sh        # 生成 deploy/secrets/（0600，已 gitignore）
+#   2. cp deploy/compose/.env.example deploy/compose/.env 并填写（HUB_UID/HUB_GID = id -u / id -g）
+#   3. docker compose --project-directory deploy/compose -f deploy/compose/docker-compose.dev.yml up -d
+#
+# 说明：
+# - Postgres/NATS 端口仅绑定 127.0.0.1，不对公网暴露；NATS 启用 JetStream 文件存储并挂持久卷。
+# - NATS token 通过 0600 配置文件挂载到 nats-server，不出现在 command/argv，不进入 docker inspect。
+# - hub 容器以宿主创建 secrets 的 UID/GID 运行（user:），确保非特权用户可读 0600 凭证文件。
+# - scout 为特权容器，使用 host network/PID 视图（端口/进程采集需要宿主视图），
+#   宿主数据只读挂载到 /host；不挂载 Docker socket。
+# - 首次启动后需执行 init/enroll（见 docs/deployment.md）。
+
+name: sentinel-dev
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 deploy/compose/.env 中设置}
+      POSTGRES_DB: sentinel
+    ports:
+      # 仅 loopback；可经 .env 调整
+      - "127.0.0.1:${POSTGRES_PORT:-5440}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  nats:
+    image: nats:2.15.1-alpine
+    restart: unless-stopped
+    # 镜像默认入口读取 /etc/nats/nats-server.conf；token 与 JetStream 配置在 0600 配置文件中
+    volumes:
+      - ../secrets/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - natsdata:/data
+    ports:
+      - "127.0.0.1:${NATS_PORT:-14222}:4222"
+      - "127.0.0.1:${NATS_MONITOR_PORT:-18222}:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  hub:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: hub
+    image: sentinel-hub:dev
+    restart: unless-stopped
+    # 以宿主创建 secrets 文件的 UID/GID 运行（.env 中 HUB_UID/HUB_GID），保证可读取 0600 凭证
+    user: "${HUB_UID:?请在 .env 设置 HUB_UID=$(id -u)}:${HUB_GID:?请在 .env 设置 HUB_GID=$(id -g)}"
+    ports:
+      - "127.0.0.1:${HUB_PORT:-8081}:8080"
+    environment:
+      SENTINEL_DATABASE_URL: postgres://sentinel:${POSTGRES_PASSWORD:?}@postgres:5432/sentinel
+      SENTINEL_ADMIN_TOKEN_FILE: /run/secrets/admin-token
+      SENTINEL_NATS_URL: nats://nats:4222
+      SENTINEL_NATS_TOKEN_FILE: /run/secrets/nats-client-token
+      RUST_LOG: ${RUST_LOG:-info}
+    secrets:
+      - admin-token
+      - nats-client-token
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "hub", "health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  scout:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: scout
+    image: sentinel-scout:dev
+    restart: unless-stopped
+    # 特权 + 宿主 network/PID 视图：端口清单与进程概况需要宿主视图（docs/architecture.md）
+    privileged: true
+    network_mode: host
+    pid: host
+    environment:
+      SENTINEL_HOST_ROOT: /host
+      SENTINEL_STATE_DIR: /var/lib/sentinel
+      # host 网络视图下经宿主 loopback 端口访问 hub/NATS
+      SENTINEL_HUB_URL: http://127.0.0.1:${HUB_PORT:-8081}
+      SENTINEL_NATS_URL: nats://127.0.0.1:${NATS_PORT:-14222}
+      SENTINEL_NATS_TOKEN_FILE: /run/secrets/nats-client-token
+      SENTINEL_INTERVAL_SECONDS: "30"
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc:/host/etc:ro
+      # /etc/os-release 常为符号链接，须另行挂载宿主 /usr/lib/os-release，避免读到容器自身文件
+      - /usr/lib/os-release:/host/usr/lib/os-release:ro
+      - /var/lib/dpkg:/host/var/lib/dpkg:ro
+      # 开发状态目录（仓库 var/scout，.gitignore 已忽略 /var/；含本地 Ed25519 身份）
+      - ../../var/scout:/var/lib/sentinel
+    secrets:
+      - nats-client-token
+    depends_on:
+      hub:
+        condition: service_started
+
+secrets:
+  admin-token:
+    file: ../secrets/admin-token
+  nats-client-token:
+    file: ../secrets/nats-client-token
+
+volumes:
+  pgdata:
+  natsdata:

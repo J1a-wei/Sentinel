@@ -1,0 +1,41 @@
+# Docker 构建上下文裁剪：镜像只需要 Cargo 工作区、web 源码与迁移 SQL
+.git
+.github
+.idea
+.vscode
+
+# Rust / 前端构建产物与依赖缓存（镜像内重新构建）
+target
+web/node_modules
+web/dist
+web/coverage
+web/test-results
+web/playwright-report
+
+# 非镜像内容：文档、测试、部署编排、脚本、本地状态与凭证
+docs
+tests
+scripts
+deploy
+configs
+var
+Makefile
+CLAUDE.md
+AGENTS.md
+README.md
+.claude*
+
+# 本地原生包产物（build-native.py 输出），不进入镜像构建上下文
+dist
+*.tar.gz
+*.tar.gz.sigstore.json
+
+# 本地数据与凭证，绝不进入镜像
+.env
+.env.*
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal

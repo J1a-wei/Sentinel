@@ -1,0 +1,43 @@
+[Unit]
+Description=Sentinel Scout
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=root
+Group=root
+WorkingDirectory=/var/lib/sentinel-scout
+Environment=SENTINEL_RUNTIME_MODE=auto
+Environment=SENTINEL_STATE_DIR=/var/lib/sentinel-scout
+EnvironmentFile=/etc/sentinel/scout/scout.env
+ExecStartPre=/opt/sentinel/scout/bin/scout doctor
+ExecStart=/opt/sentinel/scout/bin/scout
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+StateDirectory=sentinel-scout
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Host process reads may require ptrace access. Scout is a trusted host component.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+# Preserve the host PID and network views; do not enable PrivateNetwork,
+# PrivateUsers, ProtectProc=invisible, or ProcSubset=pid for the collector.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
