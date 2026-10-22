@@ -1,194 +1,154 @@
 # Sentinel
 
-Sentinel 是具备 AI 能力的主机安全引擎，采用 Rust Cargo workspace，包含两个程序：
+**集中掌握每一台 Linux 主机的资产与运行状态。**
 
-- **Hub**：服务端。托管 PostgreSQL 持久化、NATS JetStream 消息接入、管理 UI 与 API，负责集中管理与协调。
-- **Scout**：主机 Agent。以宿主采集视图（特权容器或原生进程）运行在受管主机上，做只读资产采集（系统信息、CPU/内存、网络端口与速率、进程、软件包），经本地 SQLite 队列缓冲后上报。
+Sentinel 是面向 Linux 服务器和裸机的主机资产与安全可观测平台。在主机上部署 Scout，即可通过 Hub 的 Web 控制台查看系统信息、资源使用、网络端口、进程和已安装软件包，按分组与标签管理主机。
 
-## 当前状态（一期 A）
+## 核心能力
 
-**已实现并通过测试：**
+| 能力 | 用途 |
+| --- | --- |
+| 主机资产 | 汇总系统、架构与主机身份信息，支持管理分组和多个标签 |
+| 运行状态 | 查看 CPU、内存使用情况，以及网卡流量与收发速率 |
+| 网络端口 | 查看 TCP/UDP 监听或绑定端点，支持隐藏回环地址 |
+| 进程与软件包 | 查看进程数量与明细，检索由 dpkg 管理的已安装软件包及版本 |
+| 可靠上报 | 使用签名事件与本地持久队列，在连接恢复后补传缓存数据 |
+| 统一控制台 | 在浏览器中查询主机资产、采集详情和数据覆盖情况 |
 
-- Hub：SQLx 迁移（含 ledger 可重启幂等）、事件接收与幂等、授权 API、Vue 3 管理界面（资产列表/详情、分组、标签、能力页）、`/healthz` `/readyz` 健康端点、`hub migrate` 子命令、`SENTINEL_DATABASE_URL(_FILE)` 凭证文件支持（与直接 env 互斥）。
-- Scout：持久 Ed25519 身份（`scout init`）、管理员登记（`scout enroll`）、常驻采集与断线补传（本地 SQLite 队列，1000 条 / 128 MiB 限额）、`scout once` / `scout status`（只读，常驻运行时可用）、运行时自检 `scout doctor`（只读 JSON：`detected_runtime` / `requested_mode` / `selected_mode` / `host_root` / `collection_allowed` 等；采集边界不满足时先输出 JSON 再以非零码退出）。
-- 基础设施：GitHub Actions CI（PR/push 全量测试）、tag `v*` 发布工作流（多架构镜像 + cosign keyless 签名）、发布镜像一键安装脚本（下载/验证/运行分离）、原生发布包构建脚本 `scripts/build-native.py`（无容器运行时也可产包）、正式 systemd unit（`deploy/systemd/`）。均已通过本地静态检查（actionlint、shellcheck、gitleaks）与 mock 行为测试；本机已验证原生 Rust 构建与 PG/NATS 链路、原生进程的宿主采集视图。云端 CI 已在 GitHub 托管 runner 实际通过（run 39710748680，12 job 全绿）：镜像真实构建与容器内验收（入口/用户、无挂载 doctor 拒绝、静态资源、无凭证失败、真实 PG17 迁移），以及原生包与 Ubuntu 22.04/24.04 × amd64/arm64 四平台正式 unit 实际验收（启动/身份/队列/重启）；GHCR 推送与 OIDC 签名待首个 release。
-- 测试：89 个 Rust 单元测试与 3 个 CLI 测试、PostgreSQL 应用集成测试、SQL 结构验证（47 表）、进程级端到端测试（含登记、队列补传、运行中 status 查询）、容器安装脚本 mock 行为测试，以及原生安装器 124 个回归用例；云端 CI 全量门禁（Rust/Web/SQL/e2e/scripts/images/native，run 39710748680）全部通过。
+Scout 从宿主机视角进行只读采集，支持原生 systemd 服务和 Docker 容器两种运行方式，并自动识别运行环境。
 
-**尚未实现：**
+## 架构
 
-- 漏洞评估、基线合规判定、恶意文件扫描、AI 分析、系统日志接入（Elasticsearch）。
-- Scout 自动升级：升级能力计划由 Scout 内置实现，当前安装器仅支持全新安装；原生升级流程尚未实现，不能覆盖已有身份与队列。
-- 跨主机部署边界：Hub 与 NATS 的 TLS、每主机独立 NATS 凭证/subject ACL 未实现（每主机的 Ed25519 安装身份已实现）；当前定位是单机/受控内网开发与验证环境（loopback，无 TLS）。
-- 千台规模压测与正式安全评估未执行。
+```mermaid
+flowchart LR
+    subgraph Hosts["受管主机 · 部署一个 Scout"]
+        Scout["Scout · 资产与状态采集"]
+        Queue[("SQLite · 本地持久队列")]
+        Scout --> Queue
+    end
 
-## 部署路线总览
-
-| 路线 | 适用场景 | 前置 | 章节 |
-| --- | --- | --- | --- |
-| 开发 Compose（本机 loopback） | 开发与本机验证 | Docker + Compose | [docs/deployment.md 第 3 节](docs/deployment.md) |
-| 签名 Docker Scout（`scripts/install-scout.sh`） | 已有容器运维体系的受管主机 | 首个 `v*` 发布 + Docker + cosign | [docs/deployment.md 第 4 节](docs/deployment.md) |
-| 原生签名 Hub/Scout（`scripts/install-systemd.sh`） | 服务器/裸机 systemd 主机 | 首个 `v*` 发布 + systemd + cosign + 外部 PG/NATS | [docs/deployment.md 第 5 节](docs/deployment.md) |
-| 本地自建包（`build-native.py` + `--local-bundle`） | 本机/未发布版本试用（**未签名，仅开发**） | Rust 工具链 + Node | [docs/deployment.md 第 5.5 节](docs/deployment.md) |
-
-> 云端 CI 首轮全绿：run [39710748680](https://github.com/J1a-wei/Sentinel/actions/runs/39710748680) 12 个 job 全部 success，含镜像真实构建与四平台（Ubuntu 22.04/24.04 × amd64/arm64）正式 systemd unit 实际验收；CI 测试镜像的下载/校验/加载见 [docs/deployment.md 第 4.5 节](docs/deployment.md)，完整验证范围见其第 7 节。GHCR 正式发布与签名待首个 `v*` release。
-
-## 快速开始
-
-### 开发环境（本机 loopback）
-
-```sh
-# 1. 生成本机开发凭证（deploy/secrets/，0600，已 gitignore）
-bash scripts/make-dev-secrets.sh
-
-# 2. 准备 compose 环境变量
-cp deploy/compose/.env.example deploy/compose/.env
-# 编辑 .env：POSTGRES_PASSWORD 使用随机十六进制字符串；
-# HUB_UID/HUB_GID 分别填写 id -u / id -g 输出的数字
-
-# 3. 先启动 PostgreSQL / NATS / Hub（首次会构建镜像），等 Hub 就绪
-#    注意：此时尚未启动 scout —— 未登记的常驻 Scout 会反复退出重启
-#    并与后续 init 争用状态目录，应先完成 init/enroll 再启动
-docker compose --project-directory deploy/compose \
-  -f deploy/compose/docker-compose.dev.yml up -d --build --wait postgres nats hub
-
-# 4. 初始化并登记开发 Scout（一次性，令牌来自 deploy/secrets/admin-token）
-docker compose --project-directory deploy/compose \
-  -f deploy/compose/docker-compose.dev.yml run --rm --build scout init
-docker compose --project-directory deploy/compose \
-  -f deploy/compose/docker-compose.dev.yml run --rm \
-  -v "$(pwd)/deploy/secrets/admin-token:/run/secrets/admin-token:ro" \
-  -e SENTINEL_ADMIN_TOKEN_FILE=/run/secrets/admin-token \
-  scout enroll
-
-# 5. 启动常驻 Scout 并访问 Hub UI（管理员令牌登录）
-docker compose --project-directory deploy/compose \
-  -f deploy/compose/docker-compose.dev.yml up -d --build scout
-xdg-open http://127.0.0.1:8081
+    Queue -->|签名事件| NATS[("NATS JetStream")]
+    NATS -->|事件投递| Hub["Hub · 管理 API 与 Web 控制台"]
+    Scout -.->|身份登记| Hub
+    Hub --> PG[("PostgreSQL · 资产与观测数据")]
+    Browser["浏览器"] -->|查询与管理| Hub
 ```
 
-详细说明（含 Scout 状态查询、日志、清理、常见问题）见 [docs/deployment.md](docs/deployment.md)。
+- **Hub** 部署在管理服务器上，接收和存储采集结果，提供管理界面与 API。
+- **Scout** 部署在每台受管主机上，采集宿主信息并通过 NATS 上报；断线时使用本地队列缓存。
+- **PostgreSQL 与 NATS JetStream** 是 Hub 的外部依赖，可与 Hub 同机部署，也可独立运行。
 
-### 从发布镜像安装 Scout（容器主机）
+## 选择部署方式
 
-> **注意：该方式依赖 GitHub Release 发布的签名镜像；首个 `v*` 版本发布前不可用。**
+支持 **Ubuntu 22.04 / 24.04**，架构为 **amd64 / arm64**。
 
-安装采用「下载审查 → 验证 → 运行」分离模式，脚本内置与发布工作流一致的
-digest + 精确证书身份（`.../release.yml@refs/tags/<版本>`）+ issuer 验证，
-验证失败立即退出，不会拉取或运行特权容器：
+| 方式 | 适用场景 | 入口 |
+| --- | --- | --- |
+| Docker Compose | 在本机体验完整系统，包含 Hub、Scout、PostgreSQL 和 NATS | [本机体验](docs/deployment.md#3-开发环境部署本机-loopback) |
+| systemd | 将 Hub 或 Scout 安装为服务器上的系统服务 | [原生安装脚本](scripts/install-systemd.sh) |
+| Docker Scout | 在已有 Docker 环境的主机上安装 Scout | [容器安装脚本](scripts/install-scout.sh) |
+| 本地构建包 | 从源码构建并试用原生版本 | [构建与安装](docs/deployment.md#55-本地自建包试用未签名仅本机开发) |
+
+## 一键部署
+
+安装脚本负责下载、验证签名、初始化和启动服务。原生安装使用 systemd；容器安装使用 Docker，并配置 Scout 所需的特权模式及宿主目录只读挂载。
+
+**版本选择：** 下方 `v0.1.0` 是格式示例，请替换为 [Releases](https://github.com/J1a-wei/Sentinel/releases) 中实际存在的签名版本。目前尚无签名发布版本，可先使用上面的本机体验或本地构建包方式。
+
+### 安装前准备
+
+- 安装主机需要 `curl`、Bash、Python 3 和 Cosign 3.x；原生方式需要 systemd，容器方式还需要 Docker Engine 与 buildx 插件。
+- 为 Hub 准备 PostgreSQL 和启用 JetStream 的 NATS。安装器不安装这两个依赖。
+- 凭证保存在权限为 `0600` 的文件中。`database-url` 保存 PostgreSQL 连接串，`admin.token` 保存至少 32 字符的随机 Hub 管理令牌，`nats.token` 保存 NATS 传输令牌。Scout 的 `enroll.token` 使用 Hub 管理员提供的登记凭证。
+
+当前版本适用于本机或受控内网环境。下方跨主机示例使用 HTTPS 和 NATS TLS，要求事先配置 Hub 反向代理与 NATS 的 TLS、鉴权；安装器不配置这些网络边界。详细要求见[部署指南](docs/deployment.md#1-定位与安全边界务必先读)。
+
+### Hub · systemd
+
+在管理服务器上下载并查看安装脚本，然后执行安装：
 
 ```sh
-# 替换为实际已发布的 tag（需已存在，否则 404）
 VERSION=v0.1.0
-
-# 1. 下载（不直接执行），审查脚本内容
-curl -fsSL \
-  "https://raw.githubusercontent.com/J1a-wei/Sentinel/${VERSION}/scripts/install-scout.sh" \
-  -o install-scout.sh
-less install-scout.sh
-
-# 2. 预览安装计划（离线，不执行任何操作）
-bash install-scout.sh --version "${VERSION}" --hub-url https://hub.example.com --nats-url tls://nats.example.com:4222 --plan
-
-# 3. 完整安装（验证签名 -> init -> enroll -> 启动特权容器）
-# 生产/跨机环境的前置：Hub 与 NATS 必须已具备 TLS 终结与鉴权配置（本批未内置，
-# 见 docs/deployment.md 的安全边界），NATS 地址形如 tls://nats.example.com:4222
-sudo bash install-scout.sh --version "${VERSION}" \
-  --hub-url https://hub.example.com --nats-url tls://nats.example.com:4222 \
-  --nats-token-file nats.token --enroll-token-file enroll.token
-```
-
-`--dry-run`（只读验证+预览）、`--verify-only`（验证后退出）、`--fetch-only`
-（验证+拉取不运行）供分阶段审查。全部选项见脚本 `--help` 与
-[docs/deployment.md](docs/deployment.md)。
-
-### 原生二进制 + systemd 安装 Hub / Scout（服务器/裸机）
-
-> **注意：该方式依赖 GitHub Release 发布的签名原生包；首个 `v*` 版本发布前不可用。**
-> Hub 需要外部已就绪的 PostgreSQL 与 NATS（安装器只做连通性预检，**不会安装或配置数据库/消息系统**）。
-
-```sh
-VERSION=v0.1.0   # 替换为实际已发布的 tag
-
-# 下载安装器（不直接执行），审查内容
 curl -fsSL \
   "https://raw.githubusercontent.com/J1a-wei/Sentinel/${VERSION}/scripts/install-systemd.sh" \
   -o install-systemd.sh
 less install-systemd.sh
 
-# 离线预览安装计划（不联网、不检查工具、不写任何状态）
-bash install-systemd.sh --component scout --version "${VERSION}" \
-  --hub-url https://hub.example.com --nats-url tls://nats.example.com:4222 --plan
-
-# 完整安装 Scout（验证签名包 -> doctor 自检 -> init -> enroll -> 安装 unit 并启动）
-sudo bash install-systemd.sh --component scout --version "${VERSION}" \
-  --hub-url https://hub.example.com --nats-url tls://nats.example.com:4222 \
-  --nats-token-file nats.token --enroll-token-file enroll.token
-
-# 完整安装 Hub（外部 PG/NATS 已就绪；以专用非特权用户 sentinel-hub 运行）
 sudo bash install-systemd.sh --component hub --version "${VERSION}" \
-  --database-url-file database-url --admin-token-file admin.token \
-  --nats-url nats://nats.example.com:4222 --bind 127.0.0.1:8080
+  --database-url-file database-url \
+  --admin-token-file admin.token \
+  --nats-url tls://nats.example.com:4222 \
+  --nats-token-file nats.token
 ```
 
-安装后用 systemd 管理：`systemctl status sentinel-scout`、
-`journalctl -u sentinel-scout -f`；详细选项、固定路径契约、凭证与
-`scout doctor` 采集边界说明见 [docs/deployment.md 第 5 节](docs/deployment.md)。
+Hub 默认监听 `127.0.0.1:8080`。在本机打开 <http://127.0.0.1:8080>，使用 `admin.token` 中的令牌登录；远程访问使用已配置的 HTTPS 入口。
 
-### 本地自建包试用（未签名，仅本机开发）
+### Scout · systemd
 
-在未发布任何 `v*` 版本时，可在本机构建与安装器契约一致的本地包：
+在每台受管主机上执行，替换 Hub 和 NATS 地址并准备对应凭证文件：
 
 ```sh
-# 构建本地包（默认执行 cargo release 构建与 web 前端构建）
-python3 scripts/build-native.py --version v0.1.0-local --output-dir dist
-# 产物：dist/sentinel-v0.1.0-local-linux-<amd64|arm64>.tar.gz（未签名）
+VERSION=v0.1.0
+curl -fsSL \
+  "https://raw.githubusercontent.com/J1a-wei/Sentinel/${VERSION}/scripts/install-systemd.sh" \
+  -o install-systemd.sh
+less install-systemd.sh
 
-# 用安装器以本地包安装（显式声明本地未签名模式，不执行发布链路验签）
-sudo bash scripts/install-systemd.sh --component scout \
-  --local-bundle dist/sentinel-v0.1.0-local-linux-amd64.tar.gz \
-  --version v0.1.0-local \
-  --hub-url http://127.0.0.1:8081 --nats-url nats://127.0.0.1:14222 \
-  --nats-token-file deploy/secrets/nats-client-token \
-  --enroll-token-file deploy/secrets/admin-token
+sudo bash install-systemd.sh --component scout --version "${VERSION}" \
+  --hub-url https://hub.example.com \
+  --nats-url tls://nats.example.com:4222 \
+  --nats-token-file nats.token \
+  --enroll-token-file enroll.token
 ```
 
-`--local-bundle` 模式会在输出中明确声明「本地未发布/未签名」，不得视为正式发布链路验证。
+安装器完成运行环境自检、身份初始化与 Hub 登记，并设置服务开机启动。Scout 常驻服务不保留用于登记的管理员令牌。
 
-## 仓库结构
+### Scout · Docker
 
+在受管主机上使用容器运行 Scout：
+
+```sh
+VERSION=v0.1.0
+curl -fsSL \
+  "https://raw.githubusercontent.com/J1a-wei/Sentinel/${VERSION}/scripts/install-scout.sh" \
+  -o install-scout.sh
+less install-scout.sh
+
+sudo bash install-scout.sh --version "${VERSION}" \
+  --hub-url https://hub.example.com \
+  --nats-url tls://nats.example.com:4222 \
+  --nats-token-file nats.token \
+  --enroll-token-file enroll.token
 ```
-crates/hub       Hub 服务端（Axum + SQLx + async-nats）
-crates/scout     Scout Agent（采集 + SQLite 队列 + 补传）
-crates/protocol  共享协议类型
-web/             Vue 3 + TypeScript + Vite 管理界面
-migrations/      PostgreSQL 迁移（SQLx 编译期内嵌）
-deploy/          开发 compose 编排；systemd 正式 unit（随原生包分发）
-scripts/         安装脚本（容器/原生 systemd）、本地包构建、开发凭证生成、脚本测试
-.github/         CI（测试）与 Release（构建/签名/发布）工作流
-Dockerfile       多阶段构建：hub / scout 两个 target
+
+安装完成后，主机及其采集结果会出现在 Hub 控制台。每个安装命令都可追加 `--plan` 预览配置，或使用 `--verify-only` 仅验证发布产物。脚本面向全新安装，不覆盖已有安装或执行升级。
+
+## 签名验证
+
+正式发布的容器镜像与原生安装包通过 **Cosign** 验证来源。安装器固定仓库、发布工作流、版本标签与 OIDC 签发者，验证成功后才运行镜像或解包安装。
+
+手动验证命令见[镜像签名验证](docs/deployment.md#43-脚本的安全行为)与[原生包签名验证](docs/deployment.md#52-安装包与签名验证)。本地构建包和 CI 测试产物属于未签名产物。
+
+## 日常使用
+
+systemd 服务：
+
+```sh
+systemctl status sentinel-hub
+systemctl status sentinel-scout
+sudo journalctl -u sentinel-scout -f
+```
+
+Docker Scout：
+
+```sh
+docker logs -f sentinel-scout
+docker exec sentinel-scout scout status
 ```
 
 ## 文档
 
-- [docs/architecture.md](docs/architecture.md)：架构与技术选型
-- [docs/requirements.md](docs/requirements.md)：功能范围与阶段规划
-- [docs/implementation-contract.md](docs/implementation-contract.md)：接口、环境变量与行为契约
-- [docs/database.md](docs/database.md)：数据模型
-- [docs/deployment.md](docs/deployment.md)：部署指南（四条路线、安全边界、验证状态）
-- [docs/local-testing.md](docs/local-testing.md)：本机采集、故障恢复与浏览器验收记录
-
-## 开发检查
-
-```sh
-cargo fmt --all -- --check
-cargo build --workspace --locked
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-```
-
-推送与 PR 由 GitHub Actions 自动执行上述检查、前端构建、SQL 验证、端到端
-冒烟与镜像构建（见 `.github/workflows/ci.yml`）；`v*` tag 触发发布工作流。
-
-## 许可证
-
-尚未确定。许可证选择确定前，本仓库不附带任何许可证声明。
+- [部署指南](docs/deployment.md)：环境准备、安装、配置和常见问题。
+- [配置示例](configs)：Hub 与 Scout 的环境变量示例。
+- [架构说明](docs/architecture.md)：组件职责与数据流。
+- [开发指南](AGENTS.md)：源码组织、开发约定与贡献检查。
