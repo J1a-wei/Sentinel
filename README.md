@@ -11,8 +11,8 @@ Sentinel 是具备 AI 能力的主机安全引擎，采用 Rust Cargo workspace�
 
 - Hub：SQLx 迁移（含 ledger 可重启幂等）、事件接收与幂等、授权 API、Vue 3 管理界面（资产列表/详情、分组、标签、能力页）、`/healthz` `/readyz` 健康端点、`hub migrate` 子命令、`SENTINEL_DATABASE_URL(_FILE)` 凭证文件支持（与直接 env 互斥）。
 - Scout：持久 Ed25519 身份（`scout init`）、管理员登记（`scout enroll`）、常驻采集与断线补传（本地 SQLite 队列，1000 条 / 128 MiB 限额）、`scout once` / `scout status`（只读，常驻运行时可用）、运行时自检 `scout doctor`（只读 JSON：`detected_runtime` / `requested_mode` / `selected_mode` / `host_root` / `collection_allowed` 等；采集边界不满足时先输出 JSON 再以非零码退出）。
-- 基础设施：GitHub Actions CI（PR/push 全量测试）、tag `v*` 发布工作流（多架构镜像 + cosign keyless 签名）、发布镜像一键安装脚本（下载/验证/运行分离）、原生发布包构建脚本 `scripts/build-native.py`（无容器运行时也可产包）、正式 systemd unit（`deploy/systemd/`，语法经 systemd 249 校验）。均已通过本地静态检查（actionlint、shellcheck、gitleaks）与既有 mock 行为测试；本机已验证原生 Rust 构建与 PG/NATS 链路、原生进程的宿主采集视图，Docker 镜像实际构建、GHCR 推送/OIDC 签名待 CI/首个 release 验证。
-- 测试：89 个 Rust 单元测试与 3 个 CLI 测试、PostgreSQL 应用集成测试、SQL 结构验证（47 表）、进程级端到端测试（含登记、队列补传、运行中 status 查询）、容器安装脚本 mock 行为测试，以及原生安装器 124 个回归用例。
+- 基础设施：GitHub Actions CI（PR/push 全量测试）、tag `v*` 发布工作流（多架构镜像 + cosign keyless 签名）、发布镜像一键安装脚本（下载/验证/运行分离）、原生发布包构建脚本 `scripts/build-native.py`（无容器运行时也可产包）、正式 systemd unit（`deploy/systemd/`）。均已通过本地静态检查（actionlint、shellcheck、gitleaks）与 mock 行为测试；本机已验证原生 Rust 构建与 PG/NATS 链路、原生进程的宿主采集视图。云端 CI 已在 GitHub 托管 runner 实际通过（run 39710748680，12 job 全绿）：镜像真实构建与容器内验收（入口/用户、无挂载 doctor 拒绝、静态资源、无凭证失败、真实 PG17 迁移），以及原生包与 Ubuntu 22.04/24.04 × amd64/arm64 四平台正式 unit 实际验收（启动/身份/队列/重启）；GHCR 推送与 OIDC 签名待首个 release。
+- 测试：89 个 Rust 单元测试与 3 个 CLI 测试、PostgreSQL 应用集成测试、SQL 结构验证（47 表）、进程级端到端测试（含登记、队列补传、运行中 status 查询）、容器安装脚本 mock 行为测试，以及原生安装器 124 个回归用例；云端 CI 全量门禁（Rust/Web/SQL/e2e/scripts/images/native，run 39710748680）全部通过。
 
 **尚未实现：**
 
@@ -30,7 +30,7 @@ Sentinel 是具备 AI 能力的主机安全引擎，采用 Rust Cargo workspace�
 | 原生签名 Hub/Scout（`scripts/install-systemd.sh`） | 服务器/裸机 systemd 主机 | 首个 `v*` 发布 + systemd + cosign + 外部 PG/NATS | [docs/deployment.md 第 5 节](docs/deployment.md) |
 | 本地自建包（`build-native.py` + `--local-bundle`） | 本机/未发布版本试用（**未签名，仅开发**） | Rust 工具链 + Node | [docs/deployment.md 第 5.5 节](docs/deployment.md) |
 
-> 原生安装脚本已提供；本机完成原生包与只读诊断验证，正式系统服务的完整运行矩阵留给 CI。验证范围见 [docs/deployment.md 第 7 节](docs/deployment.md)。
+> 云端 CI 首轮全绿：run [39710748680](https://github.com/J1a-wei/Sentinel/actions/runs/39710748680) 12 个 job 全部 success，含镜像真实构建与四平台（Ubuntu 22.04/24.04 × amd64/arm64）正式 systemd unit 实际验收；CI 测试镜像的下载/校验/加载见 [docs/deployment.md 第 4.5 节](docs/deployment.md)，完整验证范围见其第 7 节。GHCR 正式发布与签名待首个 `v*` release。
 
 ## 快速开始
 

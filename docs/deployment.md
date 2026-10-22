@@ -169,6 +169,20 @@ docker logs -f sentinel-scout            # 日志（登记/上报情况）
 docker exec sentinel-scout scout status  # 只读状态，常驻运行时可用
 ```
 
+### 4.5 从 CI 产物获取测试镜像（未签名，仅验证用途）
+
+CI 成功运行会产出 `container-images-ci` artifact（保留 7 天），内含 `sentinel-hub-ci-amd64.tar.gz`、`sentinel-scout-ci-amd64.tar.gz` 与 `SHA256SUMS`。它们是**未签名的 linux/amd64 测试产物，不是 GHCR/tag 正式发布**，不能替代第 4.1 节的签名拉取与验签流程。
+
+首轮构建的[镜像归档下载](https://github.com/J1a-wei/Sentinel/actions/runs/39710748680/artifacts/12396996422)于 2026-10-29 到期，下载可能需要登录 GitHub。在解压后校验摘要，通过后加载为 `sentinel-hub:ci` 和 `sentinel-scout:ci`：
+
+```sh
+unzip container-images-ci.zip -d images &&
+cd images &&
+sha256sum -c SHA256SUMS &&
+docker load -i sentinel-hub-ci-amd64.tar.gz &&
+docker load -i sentinel-scout-ci-amd64.tar.gz
+```
+
 ## 5. 原生二进制 + systemd 部署（Hub / Scout）
 
 > **前置声明**：签名包路线依赖 GitHub Release 发布的 `sentinel-vX.Y.Z-linux-{amd64,arm64}.tar.gz` 与旁车 `.tar.gz.sigstore.json`；**首个 `v*` 版本发布前该路线不可用**（无公开产物可下载），期间请使用第 5.5 节本地自建包路线。
@@ -365,7 +379,7 @@ docker run -d --name sentinel-hub \
 
 ## 7. 已验证与未验证事项
 
-**已验证（本机，开发定位）：**
+**已验证（本机开发定位 + 云端 CI）：**
 
 - 原生 Rust 构建（cargo build/test/clippy --locked）、89 个单元测试与 3 个 CLI 测试、PG 应用集成测试、SQL 结构验证。
 - 进程级端到端链路（init → enroll → once → JetStream → PostgreSQL → API，含断线补传与运行中只读 status）；原生进程的宿主采集视图（`scout doctor` 在真实主机返回 `native` / `collection_allowed=true`）。
@@ -373,12 +387,14 @@ docker run -d --name sentinel-hub \
 - compose 编排配置校验（`docker compose config`）。
 - 正式 systemd unit（`deploy/systemd/`）语法在 systemd 249 上通过校验；本地可产出契约一致的未签名原生包（`scripts/build-native.py`）。
 - 原生安装器：124 个回归用例通过，包括验签失败不解包执行、独立私有 TUF 缓存、目录/凭证权限、已有安装拒绝、Hub 就绪归属检查，以及登记/启动失败后的清理和状态保留。实际本地包的 `verify-only`、`dry-run`、`fetch-only` 通过；安装用例模拟系统边界，没有安装本机服务。
+- 云端 CI 全量门禁通过：run [39710748680](https://github.com/J1a-wei/Sentinel/actions/runs/39710748680)（commit eaa34454）12 个 job 全部 success（Rust/Web/SQL/e2e/scripts/images/native，首轮执行）。
+- Docker 镜像在 GitHub 托管 runner 真实构建并通过验收（`images` job）：镜像入口与运行用户断言；Scout 无宿主挂载时 `doctor` 输出 JSON 并拒绝采集；Hub 静态资源存在；无凭证 `migrate` 确定性失败；一次性 PostgreSQL 17 上镜像内真实 `hub migrate` 通过。产物为可下载审查的未签名测试镜像 tar（含 `SHA256SUMS`，保留 7 天，见第 4.5 节）。
+- 原生 packaged binary 与归档内正式 Hub/Scout unit 在 Ubuntu 22.04/24.04 × amd64/arm64 四平台 CI 实际验收通过：真实认证 API 与前端访问、故障恢复、重启后稳定身份与队列事件补传、owned 资源清理（jobs 119604381215 / 119604381138 / 119604381107 / 119604381247）。
 
 **未验证（诚实声明）：**
 
-- Docker 镜像**实际构建**：本机 Docker 守护进程无权限，`Dockerfile` 仅经静态审查；真实构建由 CI `images` job 完成。
-- GHCR 推送、OIDC keyless 签名、按 digest 的 cosign 验证与 `verify-blob` 原生包验签**全链路**：需要仓库 push tag 后在 GitHub 上实际运行；首个 release 时验证，验证失败工作流会中止发布。当前**尚无任何公开 release 产物**，签名下载路线（第 4、5 节）在首个 `v*` 发布前不可用。
-- 原生 systemd 安装器与正式 unit 的**完整实际安装矩阵**（安装/升级边界、重启持久性等，含 CI 上以真实 unit 的端到端验收）：尚未运行；已配置 Ubuntu 22.04/24.04 的 amd64/arm64 正式单元 CI 验收，配置不代表已通过。
+- GHCR 推送、OIDC keyless 签名、按 digest 的 cosign 验证与 `verify-blob` 原生包验签**全链路**：需要仓库 push tag 后在 GitHub 上实际运行；首个 release 时验证，验证失败工作流会中止发布。当前**尚无任何公开 release 产物**，签名下载路线（第 4、5 节）在首个 `v*` 发布前不可用；CI 镜像 artifact（第 4.5 节）是未签名测试产物，不属此链路。
+- `install-systemd.sh` 的**完整真实全新安装流程**：目前仅由 124 个 mock 回归用例覆盖；上述四平台 CI 验收（`tests/systemd_smoke.py`）直接渲染归档内正式 unit 运行，**不等价于安装器真实安装**——二者严格区分，安装器真实安装矩阵尚未运行。
 - 千台规模压测、长期稳定性与正式安全评估。
 
 ## 8. 常见问题
