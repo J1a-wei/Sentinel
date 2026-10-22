@@ -1,0 +1,38 @@
+[workspace]
+members = ["crates/protocol", "crates/hub", "crates/scout"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-nats = "0.50"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = "2.2"
+fs2 = "0.4"
+futures-util = "0.3"
+getrandom = "0.3"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "migrate", "macros", "chrono", "uuid", "json"] }
+subtle = "2.6"
+tempfile = "3.23"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "time", "net", "fs", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "timeout", "set-header"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }
+sentinel-protocol = { path = "crates/protocol" }
+
+[profile.release]
+lto = "thin"
+strip = true

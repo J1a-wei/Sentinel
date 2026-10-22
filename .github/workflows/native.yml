@@ -1,0 +1,108 @@
+name: Native packages
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 原生包构建 ${{ matrix.arch }}（Ubuntu 22.04 ABI）
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 原生构建依赖
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config binutils python3
+      - name: 构建并打包（不签名）
+        env:
+          NATIVE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/build-native.py --version "$NATIVE_VERSION" --output-dir dist
+      # SHA 由 actions/upload-artifact 官方 v7.0.2 tag 解析。
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    name: 原生运行与 systemd 冒烟 ${{ matrix.runner }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel_native
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel -d sentinel_native"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://sentinel:sentinel@127.0.0.1:5432/sentinel_native
+      TEST_NATS_URL: nats://127.0.0.1:14228
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # SHA 由 actions/download-artifact 官方 v8.0.2 tag 解析。
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-${{ matrix.arch }}
+          path: dist
+      - name: 已打包二进制冒烟（仅虚构宿主视图）
+        env:
+          NATIVE_VERSION: ${{ inputs.version }}
+          NATIVE_ARCH: ${{ matrix.arch }}
+        run: python3 tests/native_smoke.py --bundle "dist/sentinel-${NATIVE_VERSION}-linux-${NATIVE_ARCH}.tar.gz"
+      - name: 准备正式单元测试用 NATS（仅测试依赖使用容器）
+        run: |
+          set -euo pipefail
+          docker run -d --name native-unit-nats -p 127.0.0.1:14228:4222 \
+            nats:2.15.1-alpine -js -m 8222
+          for _ in $(seq 1 60); do
+            if docker exec native-unit-nats wget -q -O /dev/null http://127.0.0.1:8222/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec native-unit-nats wget -q -O /dev/null http://127.0.0.1:8222/healthz
+      - name: 包内正式 Hub/Scout 单元端到端与重启身份验证
+        env:
+          NATIVE_VERSION: ${{ inputs.version }}
+          NATIVE_ARCH: ${{ matrix.arch }}
+        run: sudo --preserve-env=TEST_DATABASE_URL,TEST_NATS_URL,GITHUB_ACTIONS python3 tests/systemd_smoke.py --bundle "dist/sentinel-${NATIVE_VERSION}-linux-${NATIVE_ARCH}.tar.gz"
+      - name: 清理测试依赖
+        if: always()
+        run: docker rm -f native-unit-nats || true

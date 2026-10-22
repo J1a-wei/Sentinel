@@ -1,0 +1,38 @@
+# Build and test output
+/bin/
+/build/
+/dist/
+/target/
+/web/node_modules/
+/web/dist/
+/web/coverage/
+/web/test-results/
+/web/playwright-report/
+/coverage/
+__pycache__/
+*.pyc
+*.test
+*.out
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+/var/
+/deploy/secrets/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local preview-provider metadata
+.openai/

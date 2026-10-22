@@ -1,0 +1,259 @@
+name: CI
+
+# PR 与 push 仅做测试，不接触发布凭证，不推送镜像，不签名。
+# release.yml 通过 workflow_call 复用本工作流作为发布前门禁。
+
+on:
+  pull_request:
+  push:
+    # main 为常规门禁；ci/** 供特性分支（如 ci/initial-image-build）真实触发远程验证
+    branches: [main, "ci/**"]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      native_version:
+        type: string
+        default: v0.1.0-ci
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: 原生二进制与 systemd
+    uses: ./.github/workflows/native.yml
+    with:
+      version: ${{ inputs.native_version || 'v0.1.0-ci' }}
+
+  rust:
+    name: Rust 检查（fmt/build/test/clippy）
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v7.0.1，SHA 来自官方仓库 tag（api.github.com/repos/actions/checkout/commits/v7.0.1）
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # 工具链由 rust-toolchain.toml 固定（1.97.1），runner 自带 rustup 自动安装
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: 构建（locked）
+        run: cargo build --workspace --locked
+      - name: 测试（locked）
+        run: cargo test --workspace --locked
+      - name: clippy（-D warnings）
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  web:
+    name: 前端构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # web/ 已完整交付：缺失即失败，不再容忍跳过
+      - name: 检查前端就绪
+        run: test -f web/package.json
+      # actions/setup-node v7.1.0，SHA 来自官方仓库 tag（api.github.com/repos/actions/setup-node/commits/v7.1.0）
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: npm ci
+        working-directory: web
+        run: npm ci
+      - name: 类型检查
+        working-directory: web
+        run: npm run --if-present type-check
+      - name: 生产构建
+        working-directory: web
+        run: npm run build
+
+  sql:
+    name: SQL 迁移与验证（hub migrate + PG 集成测试）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel -d sentinel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      SENTINEL_DATABASE_URL: postgres://sentinel:sentinel@127.0.0.1:5432/sentinel
+      TEST_DATABASE_URL: postgres://sentinel:sentinel@127.0.0.1:5432/sentinel
+      PGPASSWORD: sentinel
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 安装 psql 客户端
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+      # 迁移不能用 psql 逐文件执行：迁移脚本依赖事务内 SET LOCAL（由 hub migrate 包裹），
+      # 直接 psql 会丢失事务语义。因此用真实二进制执行迁移与集成测试。
+      - name: 构建 hub 二进制
+        run: cargo build -p hub --locked --bin hub
+      # hub migrate 启动时 Config::load 除数据库外还需管理员令牌（>=32 字符，与 NATS 无关）；
+      # 生成仅限 CI 的临时随机令牌文件（0600），不落仓库不打印
+      - name: 准备仅测试用的管理员令牌文件
+        run: |
+          umask 077
+          openssl rand -hex 32 > "$RUNNER_TEMP/ci-admin-token"
+      - name: hub migrate（真实迁移路径，含内嵌 SQLx ledger）
+        env:
+          SENTINEL_ADMIN_TOKEN_FILE: ${{ runner.temp }}/ci-admin-token
+        run: ./target/debug/hub migrate
+      - name: Hub PG 集成测试（#[ignore] 用例，验证迁移幂等与约束）
+        run: cargo test -p hub --test ingestion --locked -- --ignored
+      - name: 运行 SQL 验证（两次，含回滚清理）
+        run: |
+          set -eux
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U sentinel -d sentinel -f docs/sql/verify.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U sentinel -d sentinel -f docs/sql/verify.sql
+
+  e2e:
+    name: 进程级端到端冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 构建 debug 二进制
+        run: cargo build --workspace --locked
+      - name: 启动一次性 PostgreSQL（专用空库）
+        run: |
+          set -eux
+          docker run -d --name e2e-pg --network host \
+            -e POSTGRES_USER=sentinel -e POSTGRES_PASSWORD=sentinel -e POSTGRES_DB=sentinel_e2e \
+            postgres:17
+          for _ in $(seq 1 60); do
+            if docker exec e2e-pg pg_isready -U sentinel -d sentinel_e2e >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec e2e-pg pg_isready -U sentinel -d sentinel_e2e
+      - name: 启动一次性 NATS（JetStream，独立实例）
+        run: |
+          set -eux
+          docker run -d --name e2e-nats --network host \
+            nats:2.15.1-alpine -js -sd /data -m 8222
+          for _ in $(seq 1 60); do
+            if docker exec e2e-nats wget -q -O /dev/null http://127.0.0.1:8222/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec e2e-nats wget -q -O /dev/null http://127.0.0.1:8222/healthz
+      - name: 运行 e2e 冒烟测试
+        env:
+          TEST_DATABASE_URL: postgres://sentinel:sentinel@127.0.0.1:5432/sentinel_e2e
+          TEST_NATS_URL: nats://127.0.0.1:4222
+        run: python3 tests/e2e.py
+      - name: 清理一次性服务
+        if: always()
+        run: docker rm -f e2e-pg e2e-nats || true
+
+  scripts:
+    name: 安装脚本与 compose 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 安装 shellcheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+      - name: 运行脚本测试
+        run: bash scripts/tests/run-tests.sh
+
+  images:
+    name: 容器镜像真实构建与验收（本地构建，不推送不签名）
+    runs-on: ubuntu-latest
+    env:
+      # runner 的 Docker Engine ≥23 默认 BuildKit；显式声明，确保 RUN --mount=cache 生效
+      DOCKER_BUILDKIT: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # 顺序构建两个 target：第二次构建复用同一上下文的 cargo-build 层缓存
+      - name: 构建 scout 镜像
+        run: docker build --target scout --label "org.opencontainers.image.revision=$GITHUB_SHA" -t sentinel-scout:ci .
+      - name: 构建 hub 镜像（含前端）
+        run: docker build --target hub --label "org.opencontainers.image.revision=$GITHUB_SHA" -t sentinel-hub:ci .
+      - name: 校验镜像入口与运行用户
+        run: |
+          set -eux
+          docker image inspect sentinel-scout:ci --format '{{.Config.Entrypoint}}' | grep -q '/usr/local/bin/scout'
+          docker image inspect sentinel-hub:ci --format '{{.Config.Entrypoint}}' | grep -q '/usr/local/bin/hub'
+          docker image inspect sentinel-hub:ci --format '{{.Config.User}}' | grep -qx 'sentinel'
+      - name: scout 二进制可执行验收（doctor 输出 JSON 且拒绝容器内采集）
+        run: |
+          set -eux
+          # 容器内未挂载宿主数据：doctor 必然判定 container 并拒绝采集（非零退出）。
+          # 断言其先输出 JSON 判定结果，证明二进制可运行（动态链接/架构/入口正确）
+          rc=0
+          docker run --rm sentinel-scout:ci doctor \
+            >"$RUNNER_TEMP/scout-doctor.json" 2>"$RUNNER_TEMP/scout-doctor.err" || rc=$?
+          [ "$rc" -ne 0 ] || { echo "错误：容器内 doctor 不应放行采集"; exit 1; }
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads((Path(os.environ["RUNNER_TEMP"]) / "scout-doctor.json").read_text())
+          assert report["detected_runtime"] == "container", report
+          assert report["collection_allowed"] is False, report
+          PY
+          cat "$RUNNER_TEMP/scout-doctor.json"
+      - name: hub 静态资源验收
+        run: |
+          set -eux
+          docker run --rm --entrypoint /bin/sh sentinel-hub:ci -c \
+            'test -f /app/web/dist/index.html && test -s /app/web/dist/index.html'
+      - name: hub 凭证缺失确定性失败验收
+        run: |
+          set -eux
+          # 无凭证运行 migrate 必须失败并给出确定性报错，证明配置路径可用
+          rc=0
+          docker run --rm sentinel-hub:ci migrate >"$RUNNER_TEMP/hub-noauth.out" 2>&1 || rc=$?
+          [ "$rc" -ne 0 ] || { echo "错误：缺少凭证的 migrate 不应成功"; exit 1; }
+          grep -q 'SENTINEL_ADMIN_TOKEN or SENTINEL_ADMIN_TOKEN_FILE is required' "$RUNNER_TEMP/hub-noauth.out"
+          cat "$RUNNER_TEMP/hub-noauth.out"
+      - name: 启动一次性 PostgreSQL（镜像内迁移链路验收）
+        run: |
+          set -eux
+          docker run -d --name images-pg --network host \
+            -e POSTGRES_USER=sentinel -e POSTGRES_PASSWORD=sentinel -e POSTGRES_DB=sentinel_images \
+            postgres:17
+          for _ in $(seq 1 60); do
+            if docker exec images-pg pg_isready -U sentinel -d sentinel_images >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec images-pg pg_isready -U sentinel -d sentinel_images
+      - name: hub migrate（镜像内真实迁移链路）
+        run: |
+          set -eux
+          # 临时随机管理员令牌（仅 CI，0600，不落仓库不打印）；--user 与文件属主对齐
+          umask 077
+          openssl rand -hex 32 > "$RUNNER_TEMP/images-admin-token"
+          docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e SENTINEL_DATABASE_URL=postgres://sentinel:sentinel@127.0.0.1:5432/sentinel_images \
+            -e SENTINEL_ADMIN_TOKEN_FILE=/run/secrets/admin-token \
+            -v "$RUNNER_TEMP/images-admin-token:/run/secrets/admin-token:ro" \
+            sentinel-hub:ci migrate
+      - name: 清理一次性服务
+        if: always()
+        run: docker rm -f images-pg || true
+      - name: 导出镜像 tar（gzip，供下载审查）
+        run: |
+          set -eux
+          ARCH="$(uname -m | sed -e 's/^x86_64$/amd64/' -e 's/^aarch64$/arm64/')"
+          mkdir -p "$RUNNER_TEMP/images"
+          docker save sentinel-scout:ci | gzip >"$RUNNER_TEMP/images/sentinel-scout-ci-${ARCH}.tar.gz"
+          docker save sentinel-hub:ci | gzip >"$RUNNER_TEMP/images/sentinel-hub-ci-${ARCH}.tar.gz"
+          (cd "$RUNNER_TEMP/images" && sha256sum ./*.tar.gz > SHA256SUMS)
+          cat "$RUNNER_TEMP/images/SHA256SUMS"
+          ls -lh "$RUNNER_TEMP/images"
+      - name: 上传镜像 artifact
+        # actions/upload-artifact v7.0.2，SHA 来自官方仓库 tag（api.github.com/repos/actions/upload-artifact/commits/v7.0.2）
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: container-images-ci
+          path: ${{ runner.temp }}/images/*
+          retention-days: 7
+          if-no-files-found: error

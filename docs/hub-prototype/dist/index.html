@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1c6b50">
+  <meta name="description" content="Sentinel Hub 主机安全工作台交互原型。使用虚构数据展示资产、风险、基线与只读诊断。">
+  <title>Sentinel Hub · 安全总览</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./data.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <aside class="sidebar" id="sidebar" aria-label="主导航"></aside>
+  <div class="workspace">
+    <header class="topbar" id="topbar"></header>
+    <main id="main-content" tabindex="-1"></main>
+    <footer class="page-footer"><span>Sentinel Hub <span class="footer-separator">/</span> 看见风险，守住边界。</span><span>交互原型 · 数据均为虚构</span></footer>
+  </div>
+  <div id="overlay-root"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <noscript>此交互原型需要启用 JavaScript。所有展示数据均为虚构。</noscript>
+</body>
+</html>
